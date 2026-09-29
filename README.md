@@ -28,10 +28,21 @@ Then open http://127.0.0.1:8090 if the browser didn't open by itself.
 |-----------------------|-----------------|-------------|----------------------------------------------------|
 | `-p, --port <n>`      | `PORT`          | `8090`      | Web UI port                                        |
 | `-b, --bind <addr>`   | `BIND`          | `127.0.0.1` | Use `0.0.0.0` to open the UI from other lab hosts  |
-| `--max-upload-mb <n>` | `MAX_UPLOAD_MB` | `200`       | Largest file you can upload                        |
+| `--max-upload-mb <n>` | `MAX_UPLOAD_MB` | `2048`      | Largest file you can upload                        |
 | `-o, --open`          |                 |             | Open the UI in the default browser                 |
 
 By default the UI only listens on this machine. The tool can connect to any host you type in, so only expose it with `--bind 0.0.0.0` on a trusted lab network.
+
+### Large files
+
+Files of any size are streamed, so memory use stays small whatever the file size.
+
+- An upload is first written to a temporary file on disk. The upload time appears as its own note in the timeline and is not counted as ICAP time.
+- The file is then streamed to the ICAP server in 64 KB chunks.
+- Returned bodies larger than 8 MB also go to a temporary file. Returned bodies on disk are capped at 2 GB in total, and the oldest are dropped first.
+- Sent and returned content are compared by SHA-256.
+
+Temporary files live in a private folder under the system temp directory. The folder is removed when the tool exits. If the tool is killed, the next start removes the leftovers. Make sure the temp drive has room for about twice your largest file.
 
 ## Test samples
 

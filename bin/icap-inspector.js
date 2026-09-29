@@ -14,7 +14,7 @@ Options:
   -p, --port <n>           Web UI port (default 8090, env PORT)
   -b, --bind <addr>        Address to listen on (default 127.0.0.1, env BIND)
                            Use 0.0.0.0 to reach the UI from other lab machines.
-      --max-upload-mb <n>  Largest file you can upload (default 200, env MAX_UPLOAD_MB)
+      --max-upload-mb <n>  Largest file you can upload (default 2048, env MAX_UPLOAD_MB)
   -o, --open               Open the UI in the default browser
   -v, --version            Print the version
   -h, --help               Show this help

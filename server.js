@@ -8,15 +8,38 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
+const { Transform } = require('stream');
+const { pipeline } = require('stream/promises');
 
 const PORT = Number(process.env.PORT) || 8090;
 const BIND = process.env.BIND || '127.0.0.1';
-const MAX_UPLOAD = (Number(process.env.MAX_UPLOAD_MB) || 200) * 1024 * 1024;
+const MAX_UPLOAD = (Number(process.env.MAX_UPLOAD_MB) || 2048) * 1024 * 1024;
 const WRITE_CHUNK = 64 * 1024;
 const PREVIEW_BYTES = 4096;
+const MEM_BODY_LIMIT = 8 * 1024 * 1024;               // returned bodies larger than this spill to a temp file
+const READ_HIGH_WATER = 8 * 1024 * 1024;              // pause the ICAP socket when this much is buffered
+const OUTPUT_DISK_BUDGET = 2 * 1024 * 1024 * 1024;    // total size of returned bodies kept on disk
+const MAX_HEADER_BYTES = 1024 * 1024;
 const UA = 'ICAP-Inspector/1.0';
 const CRLF = '\r\n';
 const EMPTY = Buffer.alloc(0);
+
+// Uploads and large returned bodies live in a private temp directory that is removed on exit. The
+// directory name carries the PID, so directories left by a killed instance are swept on the next start.
+const TMP_PREFIX = 'icap-inspector-';
+for (const name of (() => { try { return fs.readdirSync(os.tmpdir()); } catch { return []; } })()) {
+  const pid = Number((name.match(/^icap-inspector-(\d+)-/) || [])[1]);
+  if (!pid || pid === process.pid) continue;
+  let alive = true;
+  try { process.kill(pid, 0); } catch (e) { alive = e.code === 'EPERM'; }
+  if (!alive) try { fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true }); } catch {}
+}
+const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), `${TMP_PREFIX}${process.pid}-`));
+let tmpSeq = 0;
+const tmpPath = (kind) => path.join(TMP_DIR, `${kind}-${++tmpSeq}`);
+const rmQuiet = (file) => fs.rm(file, { force: true }, () => {});
+process.on('exit', () => { try { fs.rmSync(TMP_DIR, { recursive: true, force: true }); } catch {} });
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => process.exit(0));
 
 // ---------------------------------------------------------------- sample payloads
 
@@ -154,7 +177,8 @@ const getH = (headers, name) => {
   return h ? h[1] : undefined;
 };
 
-function previewOf(buf, max = PREVIEW_BYTES) {
+// `buf` may be just the first bytes of a larger body; `total` is the full size.
+function previewOf(buf, max = PREVIEW_BYTES, total = buf.length) {
   const s = buf.subarray(0, max);
   let ctrl = 0;
   for (const c of s) if (c === 0 || (c < 32 && c !== 9 && c !== 10 && c !== 13)) ctrl++;
@@ -167,10 +191,10 @@ function previewOf(buf, max = PREVIEW_BYTES) {
       const asc = [...row].map((b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : '.')).join('');
       lines.push(`${i.toString(16).padStart(8, '0')}  ${hex}  ${asc}`);
     }
-    if (buf.length > h.length) lines.push(`… ${fmtBytes(buf.length - h.length)} more`);
+    if (total > h.length) lines.push(`… ${fmtBytes(total - h.length)} more`);
     return { type: 'hex', text: lines.join('\n') };
   }
-  return { type: 'text', text: s.toString('utf8') + (buf.length > max ? `\n… (${fmtBytes(buf.length - max)} more)` : '') };
+  return { type: 'text', text: s.toString('utf8') + (total > s.length ? `\n… (${fmtBytes(total - s.length)} more)` : '') };
 }
 
 // Walks the local file headers of a (stored) ZIP and renders its tree, recursing into nested ZIPs.
@@ -204,60 +228,182 @@ function write(sock, data) {
   return new Promise((resolve, reject) => sock.write(data, (e) => (e ? reject(e) : resolve())));
 }
 
-async function writeBody(sock, buf) {
+// ---------------------------------------------------------------- payload sources
+// A source is anything with a size that can yield the bytes of a range in chunks of at most WRITE_CHUNK:
+// an in-memory Buffer (samples, multipart framing) or a temp file (uploads). Bodies are streamed from
+// sources to the ICAP server, so file size does not affect memory use.
+
+function bufferSource(buf) {
+  return {
+    size: buf.length,
+    async *range(start, end) {
+      for (let i = start; i < end; i += WRITE_CHUNK) yield buf.subarray(i, Math.min(i + WRITE_CHUNK, end));
+    },
+  };
+}
+
+function fileSource(file, size) {
+  return {
+    size,
+    async *range(start, end) {
+      if (end > start) yield* fs.createReadStream(file, { start, end: end - 1, highWaterMark: WRITE_CHUNK });
+    },
+  };
+}
+
+function concatSource(parts) {
+  const srcs = parts.map((p) => (Buffer.isBuffer(p) ? bufferSource(p) : p));
+  return {
+    size: srcs.reduce((n, s) => n + s.size, 0),
+    async *range(start, end) {
+      let off = 0;
+      for (const s of srcs) {
+        const a = Math.max(start, off);
+        const b = Math.min(end, off + s.size);
+        if (a < b) yield* s.range(a - off, b - off);
+        off += s.size;
+      }
+    },
+  };
+}
+
+async function readRange(src, start, end) {
+  const parts = [];
+  for await (const c of src.range(start, Math.min(end, src.size))) parts.push(c);
+  return Buffer.concat(parts);
+}
+
+// Sends a byte range of a source as ICAP chunks, feeding the running hash of the sent body.
+async function sendRange(sock, src, start, end, hash) {
   let n = 0;
-  for (let i = 0; i < buf.length; i += WRITE_CHUNK) {
-    await write(sock, chunkify(buf.subarray(i, i + WRITE_CHUNK)));
+  for await (const c of src.range(start, end)) {
+    hash.update(c);
+    await write(sock, chunkify(c));
     n++;
   }
   return n;
 }
 
-// Buffered reader over a socket with "read until delimiter" / "read N bytes".
+// Buffered reader over a socket with "read until delimiter" / "read N bytes" / "read what's there".
+// While `reading` is on, it pauses the socket once more than READ_HIGH_WATER bytes are waiting, so a fast
+// server can't fill memory. It's off while we send: a server that answers early must not be stalled then,
+// or neither side would read and both would block.
 class Reader {
   constructor(sock) {
+    this.sock = sock;
     this.chunks = [];
     this.len = 0;
+    this.paused = false;
+    this.reading = false;
     this.done = false;
     this.err = null;
     this.waiter = null;
-    sock.on('data', (d) => { this.chunks.push(d); this.len += d.length; this._wake(); });
+    sock.on('data', (d) => {
+      this.chunks.push(d);
+      this.len += d.length;
+      if (this.reading && this.len > READ_HIGH_WATER && !this.paused) { this.paused = true; sock.pause(); }
+      this._wake();
+    });
     sock.on('end', () => { this.done = true; this._wake(); });
     sock.on('close', () => { this.done = true; this._wake(); });
     sock.on('error', (e) => { this.err = e; this._wake(); });
   }
   _wake() { const w = this.waiter; this.waiter = null; if (w) w(); }
   _wait() { return new Promise((r) => { this.waiter = r; }); }
-  _flat() {
-    if (this.chunks.length > 1) this.chunks = [Buffer.concat(this.chunks, this.len)];
-    return this.chunks[0] || EMPTY;
-  }
   _take(n) {
-    const b = this._flat();
-    const out = b.subarray(0, n);
-    const rest = b.subarray(n);
-    this.chunks = rest.length ? [rest] : [];
-    this.len = rest.length;
+    let out;
+    const first = this.chunks[0];
+    if (first.length >= n) {
+      out = first.subarray(0, n);
+      if (first.length === n) this.chunks.shift(); else this.chunks[0] = first.subarray(n);
+    } else {
+      const parts = [];
+      let need = n;
+      while (need > 0) {
+        const c = this.chunks[0];
+        if (c.length <= need) { parts.push(c); this.chunks.shift(); need -= c.length; } else { parts.push(c.subarray(0, need)); this.chunks[0] = c.subarray(need); need = 0; }
+      }
+      out = Buffer.concat(parts, n);
+    }
+    this.len -= n;
+    if (this.paused && this.len < READ_HIGH_WATER / 2) { this.paused = false; this.sock.resume(); }
     return out;
   }
   _check() {
     if (this.err) throw this.err;
     if (this.done) throw new Error('ICAP server closed the connection');
   }
+  // Delimiters are short and near the front, so search chunk by chunk instead of flattening the buffer.
   async until(delim) {
+    const d = Buffer.from(delim, 'latin1');
     for (;;) {
-      const i = this._flat().indexOf(delim);
-      if (i >= 0) return this._take(i + delim.length);
+      let acc = EMPTY;
+      for (const c of this.chunks) {
+        const from = Math.max(0, acc.length - d.length + 1);
+        acc = acc.length ? Buffer.concat([acc, c]) : c;
+        const i = acc.indexOf(d, from);
+        if (i >= 0) return this._take(i + d.length);
+        if (acc.length > MAX_HEADER_BYTES) throw new Error(`No "${JSON.stringify(delim).slice(1, -1)}" within ${fmtBytes(MAX_HEADER_BYTES)} — malformed ICAP response`);
+      }
       this._check();
       await this._wait();
     }
   }
   async bytes(n) {
+    if (n === 0) return EMPTY;
     for (;;) {
       if (this.len >= n) return this._take(n);
       this._check();
       await this._wait();
     }
+  }
+  // Returns whatever is buffered (at most `max` bytes, without copying), waiting if nothing is.
+  async some(max) {
+    for (;;) {
+      if (this.len > 0) return this._take(Math.min(max, this.chunks[0].length));
+      this._check();
+      await this._wait();
+    }
+  }
+}
+
+// Collects a returned body: kept in memory up to MEM_BODY_LIMIT, then spilled to a temp file. Hashes as it goes.
+class BodySink {
+  constructor() {
+    this.size = 0;
+    this.hash = crypto.createHash('sha256');
+    this.head = [];
+    this.headLen = 0;
+    this.mem = [];
+    this.fh = null;
+    this.file = null;
+  }
+  async write(b) {
+    this.size += b.length;
+    this.hash.update(b);
+    if (this.headLen < PREVIEW_BYTES) {
+      const h = b.subarray(0, PREVIEW_BYTES - this.headLen);
+      this.head.push(h);
+      this.headLen += h.length;
+    }
+    if (!this.fh && this.size > MEM_BODY_LIMIT) {
+      this.file = tmpPath('output');
+      this.fh = await fs.promises.open(this.file, 'w');
+      for (const m of this.mem) await this.fh.write(m);
+      this.mem = [];
+    }
+    if (this.fh) await this.fh.write(b); else this.mem.push(b);
+  }
+  async finish() {
+    if (this.fh) await this.fh.close();
+    return {
+      size: this.size, sha256: this.hash.digest('hex'), head: Buffer.concat(this.head),
+      body: this.fh ? null : Buffer.concat(this.mem), file: this.file,
+    };
+  }
+  async discard() {
+    if (this.fh) await this.fh.close().catch(() => {});
+    if (this.file) rmQuiet(this.file);
   }
 }
 
@@ -281,8 +427,8 @@ function parseEncapsulated(v) {
   });
 }
 
-async function readChunked(rd) {
-  const parts = [];
+// Streams a chunked body into `sink` piece by piece — a single huge chunk is never held in memory whole.
+async function readChunked(rd, sink) {
   let chunks = 0;
   for (;;) {
     const line = (await rd.until('\r\n')).toString('latin1').trim();
@@ -292,13 +438,18 @@ async function readChunked(rd) {
       for (;;) if ((await rd.until('\r\n')).length === 2) break; // skip trailers
       break;
     }
-    parts.push(await rd.bytes(size));
+    for (let left = size; left > 0;) {
+      const b = await rd.some(Math.min(left, 1024 * 1024));
+      await sink.write(b);
+      left -= b.length;
+    }
     await rd.bytes(2);
     chunks++;
   }
-  return { body: Buffer.concat(parts), chunks };
+  return chunks;
 }
 
+// Returns the encapsulated header sections as text and the body (if any) as a finished BodySink result.
 async function readEncapsulated(rd, resp) {
   const enc = parseEncapsulated(getH(resp.headers, 'Encapsulated'));
   const sections = {};
@@ -309,7 +460,16 @@ async function readEncapsulated(rd, resp) {
     const { name, offset } = enc[i];
     if (name.endsWith('-body')) {
       bodyType = name;
-      if (name !== 'null-body') ({ body, chunks } = await readChunked(rd));
+      if (name !== 'null-body') {
+        const sink = new BodySink();
+        try {
+          chunks = await readChunked(rd, sink);
+          body = await sink.finish();
+        } catch (e) {
+          await sink.discard();
+          throw e;
+        }
+      }
       break;
     }
     const next = enc[i + 1];
@@ -394,12 +554,14 @@ function runOptions(cfg, emit) {
     ev({ kind: 'send', title: `OPTIONS /${cfg.service}`, raw: head });
     const tWait = clock();
     ev({ kind: 'wait', title: 'waiting for OPTIONS response' });
+    rd.reading = true;
     const resp = await readIcapHead(rd);
     const serverMs = clock() - tWait;
     const enc = await readEncapsulated(rd, resp);
+    if (enc.body && enc.body.file) rmQuiet(enc.body.file);
     ev({
       kind: 'recv', tone: resp.status === 200 ? 'ok' : 'bad', title: resp.statusLine.replace(/^ICAP\/\S+\s+/, ''),
-      raw: resp.headRaw + (enc.body ? `[opt-body: ${fmtBytes(enc.body.length)}]` : ''),
+      raw: resp.headRaw + (enc.body ? `[opt-body: ${fmtBytes(enc.body.size)}]` : ''),
     });
     return {
       type: 'options', uri,
@@ -418,33 +580,35 @@ function buildEncapsulated(cfg, p) {
   try { u = new URL(raw); } catch { throw new Error(`Simulated URL is not a valid absolute URL: ${raw}`); }
   const safeName = p.name.replace(/[^\x20-\x7e]|"/g, '_');
   const ua = 'User-Agent: Mozilla/5.0 (ICAP Inspector)';
+  const size = p.source.size;
   if (cfg.mode === 'RESPMOD') {
     const req = `GET ${u.href} HTTP/1.1${CRLF}Host: ${u.host}${CRLF}${ua}${CRLF}Accept: */*${CRLF}${CRLF}`;
-    const res = `HTTP/1.1 200 OK${CRLF}Content-Type: ${p.mime}${CRLF}Content-Length: ${p.data.length}${CRLF}` +
+    const res = `HTTP/1.1 200 OK${CRLF}Content-Type: ${p.mime}${CRLF}Content-Length: ${size}${CRLF}` +
       `Content-Disposition: attachment; filename="${safeName}"${CRLF}${CRLF}`;
-    const bodyTag = p.data.length ? 'res-body' : 'null-body';
-    return { parts: [req, res], encap: `req-hdr=0, res-hdr=${req.length}, ${bodyTag}=${req.length + res.length}`, body: p.data.length ? p.data : null };
+    const bodyTag = size ? 'res-body' : 'null-body';
+    return { parts: [req, res], encap: `req-hdr=0, res-hdr=${req.length}, ${bodyTag}=${req.length + res.length}`, body: size ? p.source : null };
   }
-  if (!p.data.length) {
+  if (!size) {
     const req = `GET ${u.href} HTTP/1.1${CRLF}Host: ${u.host}${CRLF}${ua}${CRLF}${CRLF}`;
     return { parts: [req], encap: `req-hdr=0, null-body=${req.length}`, body: null };
   }
-  let body = p.data;
+  let body = p.source;
   let ctype = p.mime;
   if (cfg.uploadEncoding === 'multipart') {
     const b = `----ICAPInspector${crypto.randomBytes(8).toString('hex')}`;
-    body = Buffer.concat([
+    body = concatSource([
       Buffer.from(`--${b}${CRLF}Content-Disposition: form-data; name="file"; filename="${safeName}"${CRLF}Content-Type: ${p.mime}${CRLF}${CRLF}`, 'latin1'),
-      p.data,
+      p.source,
       Buffer.from(`${CRLF}--${b}--${CRLF}`, 'latin1'),
     ]);
     ctype = `multipart/form-data; boundary=${b}`;
   }
-  const req = `POST ${u.href} HTTP/1.1${CRLF}Host: ${u.host}${CRLF}${ua}${CRLF}Content-Type: ${ctype}${CRLF}Content-Length: ${body.length}${CRLF}${CRLF}`;
+  const req = `POST ${u.href} HTTP/1.1${CRLF}Host: ${u.host}${CRLF}${ua}${CRLF}Content-Type: ${ctype}${CRLF}Content-Length: ${body.size}${CRLF}${CRLF}`;
   return { parts: [req], encap: `req-hdr=0, req-body=${req.length}`, body };
 }
 
-function classify(mode, resp, enc, sentBody) {
+// `sent` and `enc.body` are { size, sha256 } summaries (or null) — content is compared by hash, never held twice.
+function classify(mode, resp, enc, sent) {
   if (resp.status === 204) {
     return { code: 'allow', label: 'Allowed', reason: '204 No Content — the server did not modify anything; the original message passes through untouched.' };
   }
@@ -460,28 +624,36 @@ function classify(mode, resp, enc, sentBody) {
   if (httpStatus && httpStatus >= 400) {
     return { code: 'block', label: 'Blocked', httpStatus, reason: `The download was replaced with an HTTP ${httpStatus} response (block page).` };
   }
-  if (!sentBody && !enc.body) return { code: 'allow', label: 'Allowed', reason: '200 OK — request allowed (headers only).' };
-  if (sentBody && enc.body && enc.body.equals(sentBody)) {
-    return { code: 'allow', label: 'Allowed', reason: '200 OK with the original content returned byte-for-byte unchanged.' };
+  if (!sent && !enc.body) return { code: 'allow', label: 'Allowed', reason: '200 OK — request allowed (headers only).' };
+  if (sent && enc.body && enc.body.size === sent.size && enc.body.sha256 === sent.sha256) {
+    return { code: 'allow', label: 'Allowed', reason: '200 OK with the original content returned unchanged (identical SHA-256).' };
   }
   if (!enc.body) return { code: 'modified', label: 'Modified', reason: 'The server removed the body from the message.' };
   return {
     code: 'modified', label: 'Modified',
-    reason: `Content was rewritten by the server (${fmtBytes(sentBody ? sentBody.length : 0)} → ${fmtBytes(enc.body.length)}) — typically content disarm (CDR) sanitization or DLP redaction.`,
+    reason: `Content was rewritten by the server (${fmtBytes(sent ? sent.size : 0)} → ${fmtBytes(enc.body.size)}) — typically content disarm (CDR) sanitization or DLP redaction.`,
   };
 }
 
+// Returned bodies, for download / block-page viewing: small ones in memory, large ones as temp files.
+// Oldest entries are dropped beyond 50 entries or OUTPUT_DISK_BUDGET bytes on disk.
 const outputs = new Map();
 function storeOutput(o) {
   const id = crypto.randomUUID();
   outputs.set(id, o);
-  while (outputs.size > 50) outputs.delete(outputs.keys().next().value);
+  let disk = 0;
+  for (const x of outputs.values()) if (x.file) disk += x.size;
+  for (const [key, x] of outputs) {
+    if (outputs.size <= 50 && disk <= OUTPUT_DISK_BUDGET) break;
+    if (x.file) { disk -= x.size; rmQuiet(x.file); }
+    outputs.delete(key);
+  }
   return id;
 }
 
-function bodyRaw(label, buf) {
-  const p = previewOf(buf, 1024);
-  return `${label}: ${fmtBytes(buf.length)} (chunked encoding)\n\n${p.text}`;
+function bodyRaw(label, head, total) {
+  const p = previewOf(head, 1024, total);
+  return `${label}: ${fmtBytes(total)} (chunked encoding)\n\n${p.text}`;
 }
 
 function runScan(cfg, payload, emit) {
@@ -507,6 +679,15 @@ function runScan(cfg, payload, emit) {
     const headBuf = Buffer.from(icapHead + httpHeaders, 'latin1');
     const headRaw = icapHead + httpHeaders;
 
+    if (payload.uploadMs != null) {
+      ev({ kind: 'info', title: `Upload from browser received first: ${fmtBytes(payload.source.size)} in ${fmtMs(payload.uploadMs)} (not counted as ICAP time)` });
+    }
+
+    // The sent body is hashed as it streams out; `hashed` tracks how far, so it can be completed if the
+    // server decides after the preview and the rest is never sent.
+    const sentHash = crypto.createHash('sha256');
+    let hashed = 0;
+    const end0 = '0\r\n\r\n';
     let complete = true;
     if (!body) {
       await write(sock, headBuf);
@@ -514,42 +695,54 @@ function runScan(cfg, payload, emit) {
     } else if (!usePreview) {
       await write(sock, headBuf);
       ev({ kind: 'send', title: `${mode} headers (${fmtBytes(headBuf.length)})`, raw: headRaw });
-      const n = await writeBody(sock, body);
-      await write(sock, '0\r\n\r\n');
-      ev({ kind: 'send', title: `Body ${fmtBytes(body.length)} · ${n} chunk${n === 1 ? '' : 's'} + 0`, raw: bodyRaw('Encapsulated body sent', body) });
+      const head = await readRange(body, 0, 1024);
+      const n = await sendRange(sock, body, 0, body.size, sentHash);
+      hashed = body.size;
+      await write(sock, end0);
+      ev({ kind: 'send', title: `Body ${fmtBytes(body.size)} · ${n} chunk${n === 1 ? '' : 's'} + 0`, raw: bodyRaw('Encapsulated body sent', head, body.size) });
     } else {
-      const pv = body.subarray(0, cfg.preview);
-      complete = body.length <= cfg.preview;
-      await write(sock, Buffer.concat([headBuf, pv.length ? chunkify(pv) : EMPTY, Buffer.from(complete ? '0; ieof\r\n\r\n' : '0\r\n\r\n', 'latin1')]));
+      const pvLen = Math.min(cfg.preview, body.size);
+      complete = body.size <= cfg.preview;
+      const pv = await readRange(body, 0, pvLen);
+      sentHash.update(pv);
+      hashed = pvLen;
+      await write(sock, Buffer.concat([headBuf, pv.length ? chunkify(pv) : EMPTY, Buffer.from(complete ? '0; ieof\r\n\r\n' : end0, 'latin1')]));
       ev({ kind: 'send', title: `${mode} headers (${fmtBytes(headBuf.length)})`, raw: headRaw });
       ev({
         kind: 'send',
-        title: complete ? `Preview ${fmtBytes(pv.length)} + ieof (whole body)` : `Preview ${fmtBytes(pv.length)} of ${fmtBytes(body.length)}`,
-        raw: bodyRaw(complete ? 'Preview (entire body, terminated with "0; ieof")' : 'Preview (terminated with "0" — server may ask for the rest)', pv),
+        title: complete ? `Preview ${fmtBytes(pv.length)} + ieof (whole body)` : `Preview ${fmtBytes(pv.length)} of ${fmtBytes(body.size)}`,
+        raw: bodyRaw(complete ? 'Preview (entire body, terminated with "0; ieof")' : 'Preview (terminated with "0" — server may ask for the rest)', pv, pv.length),
       });
     }
 
     let tWait = clock();
     ev({ kind: 'wait', core: true, title: 'scanning' });
+    rd.reading = true;
     let resp = await readIcapHead(rd);
 
     if (resp.status === 100) {
       if (!usePreview || complete) throw new Error('Server sent 100 Continue although there is nothing left to send');
       ev({ kind: 'recv', tone: 'info', title: '100 Continue — send the rest', raw: resp.headRaw });
-      const rest = body.subarray(cfg.preview);
-      const n = await writeBody(sock, rest);
-      await write(sock, '0\r\n\r\n');
-      ev({ kind: 'send', title: `Remaining body ${fmtBytes(rest.length)} · ${n} chunk${n === 1 ? '' : 's'} + 0`, raw: bodyRaw('Remainder sent', rest) });
+      const restLen = body.size - cfg.preview;
+      const head = await readRange(body, cfg.preview, cfg.preview + 1024);
+      rd.reading = false;
+      const n = await sendRange(sock, body, cfg.preview, body.size, sentHash);
+      rd.reading = true;
+      hashed = body.size;
+      await write(sock, end0);
+      ev({ kind: 'send', title: `Remaining body ${fmtBytes(restLen)} · ${n} chunk${n === 1 ? '' : 's'} + 0`, raw: bodyRaw('Remainder sent', head, restLen) });
       tWait = clock();
       ev({ kind: 'wait', core: true, title: 'scanning' });
       resp = await readIcapHead(rd);
     } else if (usePreview && !complete) {
-      ev({ kind: 'info', title: `Server decided after the preview — the other ${fmtBytes(body.length - cfg.preview)} were never sent` });
+      ev({ kind: 'info', title: `Server decided after the preview — the other ${fmtBytes(body.size - cfg.preview)} were never sent` });
     }
     const serverMs = clock() - tWait;
 
     const enc = await readEncapsulated(rd, resp);
-    const verdict = classify(mode, resp, enc, body);
+    if (body && hashed < body.size) for await (const c of body.range(hashed, body.size)) sentHash.update(c);
+    const sent = body ? { size: body.size, sha256: sentHash.digest('hex') } : null;
+    const verdict = classify(mode, resp, enc, sent);
     const tone = { allow: 'ok', block: 'bad', modified: 'warn' }[verdict.code] || 'bad';
     ev({ kind: 'recv', tone, title: resp.statusLine.replace(/^ICAP\/\S+\s+/, ''), raw: resp.headRaw });
 
@@ -557,18 +750,21 @@ function runScan(cfg, payload, emit) {
     if (sectionText || enc.body) {
       ev({
         kind: 'recv', tone,
-        title: `Encapsulated ${Object.keys(enc.sections).join(' + ') || ''}${enc.body ? ` + body ${fmtBytes(enc.body.length)}` : ''}`,
-        raw: sectionText + (enc.body ? bodyRaw('\nEncapsulated body received', enc.body) : ''),
+        title: `Encapsulated ${Object.keys(enc.sections).join(' + ') || ''}${enc.body ? ` + body ${fmtBytes(enc.body.size)}` : ''}`,
+        raw: sectionText + (enc.body ? bodyRaw('\nEncapsulated body received', enc.body.head, enc.body.size) : ''),
       });
     }
 
     let received = null;
     if (enc.body) {
       const ctype = httpContentType(enc.sections['res-hdr'] || enc.sections['req-hdr']);
-      const out = { body: enc.body, contentType: ctype, filename: `icap-output-${payload.name.replace(/[^\w.-]/g, '_')}` };
-      const pv = previewOf(enc.body);
+      const out = {
+        body: enc.body.body, file: enc.body.file, size: enc.body.size, contentType: ctype,
+        filename: `icap-output-${payload.name.replace(/[^\w.-]/g, '_')}`,
+      };
+      const pv = previewOf(enc.body.head, PREVIEW_BYTES, enc.body.size);
       received = {
-        id: storeOutput(out), size: enc.body.length, sha256: sha256(enc.body), chunks: enc.chunks,
+        id: storeOutput(out), size: enc.body.size, sha256: enc.body.sha256, chunks: enc.chunks,
         contentType: ctype, preview: pv.text, previewType: pv.type,
       };
     }
@@ -577,8 +773,8 @@ function runScan(cfg, payload, emit) {
       type: 'scan', mode, uri,
       icap: { status: resp.status, reason: resp.reason, statusLine: resp.statusLine, headers: resp.headers },
       http: enc.sections, bodyType: enc.bodyType,
-      file: { name: payload.name, size: payload.data.length, sha256: sha256(payload.data) },
-      sent: body ? { size: body.length, sha256: sha256(body) } : null,
+      file: { name: payload.name, size: payload.source.size, sha256: payload.sha256 },
+      sent,
       received,
       timings: { serverMs },
       verdict,
@@ -629,6 +825,38 @@ function readBody(req, limit) {
   });
 }
 
+// Streams an upload to a temp file, hashing it on the way. Nothing is held in memory.
+async function receiveUpload(req, limit) {
+  const t0 = performance.now();
+  const file = tmpPath('upload');
+  const hash = crypto.createHash('sha256');
+  let size = 0;
+  const meter = new Transform({
+    transform(chunk, _enc, cb) {
+      size += chunk.length;
+      if (size > limit) return cb(new Error(`Upload exceeds this server's limit of ${fmtBytes(limit)}. Restart ICAP Inspector with --max-upload-mb <n>.`));
+      hash.update(chunk);
+      cb(null, chunk);
+    },
+  });
+  try {
+    await pipeline(req, meter, fs.createWriteStream(file));
+  } catch (e) {
+    rmQuiet(file);
+    throw e;
+  }
+  if (!size) { rmQuiet(file); return null; }
+  return { file, size, sha256: hash.digest('hex'), uploadMs: performance.now() - t0 };
+}
+
+// Replies 413 with an explanation. Node discards the unread request body afterwards and keeps the
+// connection open, so the browser gets this message instead of a reset connection ("Failed to fetch").
+function tooLarge(res, size) {
+  res.writeHead(413, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end(`The file is ${fmtBytes(size)}, larger than this server's upload limit of ${fmtBytes(MAX_UPLOAD)}. ` +
+    `Restart ICAP Inspector with --max-upload-mb ${Math.ceil(size / 1048576)} (or higher).`);
+}
+
 async function stream(res, fn) {
   res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff' });
   const emit = (o) => { if (!res.destroyed && !res.writableEnded) res.write(JSON.stringify(o) + '\n'); };
@@ -677,32 +905,43 @@ const server = http.createServer(async (req, res) => {
       const cfg = normalizeCfg(JSON.parse((await readBody(req, 1e5)).toString() || '{}'));
       return stream(res, (emit) => runOptions(cfg, emit));
     }
+    if (req.method === 'GET' && u.pathname === '/api/config') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ maxUploadBytes: MAX_UPLOAD }));
+    }
     if (req.method === 'POST' && u.pathname === '/api/scan') {
       const cfg = normalizeCfg(JSON.parse(u.searchParams.get('cfg') || '{}'));
-      const upload = await readBody(req, MAX_UPLOAD);
       let payload;
+      let upload = null;
       if (cfg.sample) {
+        req.resume();
         const s = SAMPLES.find((x) => x.id === cfg.sample);
         if (!s) throw new Error(`Unknown sample: ${cfg.sample}`);
-        payload = { name: s.name, mime: s.mime, data: s.data };
+        payload = { name: s.name, mime: s.mime, source: bufferSource(s.data), sha256: sha256(s.data) };
       } else {
-        payload = { name: cfg.fileName, mime: cfg.mime, data: upload };
+        const declared = Number(req.headers['content-length']);
+        if (declared > MAX_UPLOAD) return tooLarge(res, declared);
+        upload = await receiveUpload(req, MAX_UPLOAD);
+        payload = upload
+          ? { name: cfg.fileName, mime: cfg.mime, source: fileSource(upload.file, upload.size), sha256: upload.sha256, uploadMs: upload.uploadMs }
+          : { name: cfg.fileName, mime: cfg.mime, source: bufferSource(EMPTY), sha256: sha256(EMPTY) };
       }
-      if (cfg.mode === 'RESPMOD' && !payload.data.length) throw new Error('RESPMOD needs a file or sample to scan');
-      return stream(res, (emit) => runScan(cfg, payload, emit));
+      try {
+        if (cfg.mode === 'RESPMOD' && !payload.source.size) throw new Error('RESPMOD needs a file or sample to scan');
+        return await stream(res, (emit) => runScan(cfg, payload, emit));
+      } finally {
+        if (upload) rmQuiet(upload.file);
+      }
     }
     const m = u.pathname.match(/^\/api\/output\/([\w-]+)$/);
     if (req.method === 'GET' && m) {
       const o = outputs.get(m[1]);
       if (!o) { res.writeHead(404); return res.end('Output expired'); }
-      if (u.searchParams.has('view')) {
-        res.writeHead(200, {
-          'Content-Type': o.contentType || 'text/plain; charset=utf-8',
-          'Content-Security-Policy': 'sandbox', 'X-Content-Type-Options': 'nosniff',
-        });
-      } else {
-        res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${o.filename}"` });
-      }
+      const headers = u.searchParams.has('view')
+        ? { 'Content-Type': o.contentType || 'text/plain; charset=utf-8', 'Content-Security-Policy': 'sandbox', 'X-Content-Type-Options': 'nosniff' }
+        : { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${o.filename}"` };
+      res.writeHead(200, { ...headers, 'Content-Length': o.size });
+      if (o.file) return fs.createReadStream(o.file).on('error', () => res.destroy()).pipe(res);
       return res.end(o.body);
     }
     res.writeHead(404, { 'Content-Type': 'text/plain' });

@@ -85,6 +85,7 @@
   .drop { border: 1.5px dashed var(--border); border-radius: 8px; padding: 14px; text-align: center; font-size: 13px; }
   .drop.over { border-color: var(--accent); background: var(--code); }
   .drop.has { border-style: solid; border-color: var(--accent); }
+  #fileInfo.over { color: var(--bad); font-weight: 600; }
   .link { display: inline; color: var(--accent); cursor: pointer; text-decoration: underline; font-size: inherit; margin: 0; }
   .muted { color: var(--muted); }
   .small { font-size: 12px; margin: 10px 0 6px; }
@@ -286,6 +287,7 @@ const LANE_X = [100 / 6, 50, 500 / 6];
 const TAG_TEXT = { allow: 'Allowed', block: 'Blocked', modified: 'Modified', error: 'Error', ok: 'OK', policy: 'Policy-dependent' };
 
 let mode = 'RESPMOD';
+let maxUpload = null;
 let selectedFile = null, selectedSample = null, samples = [];
 let history = [], current = null, busy = false, suiteRows = null, liveTimer = null;
 
@@ -368,9 +370,18 @@ async function viewSample(id) {
 function renderPayload() {
   const d = $('drop');
   d.classList.toggle('has', !!selectedFile);
-  $('fileInfo').textContent = selectedFile ? `${selectedFile.name} · ${fmtBytes(selectedFile.size)} · ${selectedFile.type || 'unknown type'}` : '';
+  const info = $('fileInfo');
+  const over = selectedFile && tooBig(selectedFile);
+  info.classList.toggle('over', !!over);
+  info.textContent = selectedFile
+    ? `${selectedFile.name} · ${fmtBytes(selectedFile.size)} · ${selectedFile.type || 'unknown type'}${over ? ` — over the ${fmtBytes(maxUpload)} upload limit` : ''}`
+    : maxUpload ? `Up to ${fmtBytes(maxUpload)}` : '';
   renderSamples();
 }
+const tooBig = (f) => maxUpload != null && f.size > maxUpload;
+const limitMessage = (f) => `${f.name} is ${fmtBytes(f.size)}, larger than this server's upload limit of ${fmtBytes(maxUpload)}.\n\n` +
+  `Restart ICAP Inspector with --max-upload-mb ${Math.ceil(f.size / 1048576)} (or higher), e.g.\n` +
+  `npx github:reddoubledecker/icap-inspector --max-upload-mb ${Math.ceil(f.size / 1048576)}`;
 function pickFile(f) { selectedFile = f || null; selectedSample = null; renderPayload(); }
 
 // ------------------------------------------------------------ transport
@@ -422,6 +433,7 @@ function scan(sample) {
   if (sample) { c.sample = sample.id; label = sample.name; }
   else if (selectedSample) { c.sample = selectedSample.id; label = selectedSample.name; }
   else if (selectedFile) {
+    if (tooBig(selectedFile)) { alert(limitMessage(selectedFile)); return null; }
     c.fileName = selectedFile.name;
     c.mime = selectedFile.type || 'application/octet-stream';
     body = selectedFile;
@@ -683,6 +695,7 @@ applyTheme(document.documentElement.dataset.theme);
 loadSettings();
 renderAll();
 fetch('/api/samples').then((r) => r.json()).then((s) => { samples = s; renderPayload(); });
+fetch('/api/config').then((r) => r.json()).then((c) => { maxUpload = c.maxUploadBytes; renderPayload(); }).catch(() => {});
 </script>
 </body>
 </html>
