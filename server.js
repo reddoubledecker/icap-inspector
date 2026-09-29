@@ -637,7 +637,13 @@ async function stream(res, fn) {
 }
 
 const INDEX = path.join(__dirname, 'public', 'index.html');
-const LOGO = path.join(__dirname, 'public', 'logo.svg');
+// Static assets served from public/ — an explicit allowlist, so nothing else in the package is reachable.
+const STATIC = {
+  '/logo.svg': ['logo.svg', 'image/svg+xml'],
+  '/favicon.ico': ['favicon-32.png', 'image/png'],
+  '/favicon-32.png': ['favicon-32.png', 'image/png'],
+  '/apple-touch-icon.png': ['apple-touch-icon.png', 'image/png'],
+};
 
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://localhost');
@@ -646,9 +652,10 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
       return fs.createReadStream(INDEX).pipe(res);
     }
-    if (req.method === 'GET' && (u.pathname === '/logo.svg' || u.pathname === '/favicon.ico')) {
-      res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'max-age=86400' });
-      return fs.createReadStream(LOGO).pipe(res);
+    if (req.method === 'GET' && STATIC[u.pathname]) {
+      const [file, type] = STATIC[u.pathname];
+      res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'max-age=86400' });
+      return fs.createReadStream(path.join(__dirname, 'public', file)).pipe(res);
     }
     if (req.method === 'GET' && u.pathname === '/api/samples') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });

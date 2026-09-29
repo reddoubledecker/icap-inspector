@@ -4,23 +4,47 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ICAP Inspector</title>
-<link rel="icon" type="image/svg+xml" href="/logo.svg">
+<link rel="icon" type="image/svg+xml" href="/logo.svg?v=2">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=2">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#171e26" media="(prefers-color-scheme: dark)">
+<script>
+  // Apply the saved theme before first paint so the page never flashes the wrong one.
+  try { const t = localStorage.getItem('icapInspectorTheme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch {}
+</script>
 <style>
   :root {
+    color-scheme: light;
     --bg: #f4f6f8; --panel: #ffffff; --text: #17202a; --muted: #5d6b7b; --border: #dbe1e8;
     --code: #f0f3f6; --accent: #1f5fd6; --accent-text: #ffffff; --lane: #cfd7e0;
     --ok: #13803b; --ok-bg: #e7f5ec; --bad: #c42b2b; --bad-bg: #fbeaea;
     --warn: #a95c00; --warn-bg: #fdf1e1; --info: #4b5b70; --info-bg: #eef1f5;
+    --backdrop: rgba(15, 20, 26, .45);
     --mono: ui-monospace, "Cascadia Code", Consolas, Menlo, monospace;
   }
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
       --bg: #0f141a; --panel: #171e26; --text: #e3e9ef; --muted: #93a1b1; --border: #2a3440;
       --code: #0f151c; --accent: #5b94ff; --accent-text: #0b1220; --lane: #34414f;
       --ok: #4cc97a; --ok-bg: #11291b; --bad: #ff6b6b; --bad-bg: #2f1616;
       --warn: #f0a847; --warn-bg: #2e2112; --info: #a7b5c6; --info-bg: #1d2530;
+      --backdrop: rgba(0, 0, 0, .6);
     }
   }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0f141a; --panel: #171e26; --text: #e3e9ef; --muted: #93a1b1; --border: #2a3440;
+    --code: #0f151c; --accent: #5b94ff; --accent-text: #0b1220; --lane: #34414f;
+    --ok: #4cc97a; --ok-bg: #11291b; --bad: #ff6b6b; --bad-bg: #2f1616;
+    --warn: #f0a847; --warn-bg: #2e2112; --info: #a7b5c6; --info-bg: #1d2530;
+    --backdrop: rgba(0, 0, 0, .6);
+  }
+  .theme { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .theme button { border: 0; border-radius: 0; background: transparent; padding: 4px 9px; font-size: 13px; color: var(--muted); }
+  .theme button + button { border-left: 1px solid var(--border); }
+  .theme button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
@@ -70,7 +94,7 @@
   .view { padding: 0 9px; font-size: 12px; color: var(--accent); }
   dialog { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 64px); padding: 0; border: 1px solid var(--border);
     border-radius: 10px; background: var(--panel); color: var(--text); }
-  dialog::backdrop { background: rgba(0, 0, 0, .45); }
+  dialog::backdrop { background: var(--backdrop); }
   .dlg-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border);
     position: sticky; top: 0; background: var(--panel); }
   .dlg-head strong { font-family: var(--mono); }
@@ -145,9 +169,14 @@
 </head>
 <body>
 <header class="top">
-  <div class="brand"><img src="/logo.svg" alt="" width="28" height="28">ICAP Inspector <small>direct ICAP client for testing ICAP servers</small></div>
+  <div class="brand"><img src="/logo.svg?v=2" alt="" width="28" height="28">ICAP Inspector <small>direct ICAP client for testing ICAP servers</small></div>
   <div class="top-right">
     <div class="pill" id="target">no server set</div>
+    <div class="theme" id="theme" role="group" aria-label="Color theme">
+      <button data-t="auto" title="Follow the system setting">Auto</button>
+      <button data-t="light" title="Light theme">Light</button>
+      <button data-t="dark" title="Dark theme">Dark</button>
+    </div>
     <button id="btnReset" title="Clear history, timeline, test-suite results and payload selection. Server settings are kept.">Reset session</button>
   </div>
 </header>
@@ -641,6 +670,15 @@ $('suite').addEventListener('click', (e) => {
 $('details').addEventListener('click', (e) => {
   if (e.target.id === 'usePreview') { $('preview').value = e.target.dataset.v; saveSettings(); }
 });
+
+function applyTheme(t) {
+  if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  else { t = 'auto'; delete document.documentElement.dataset.theme; }
+  document.querySelectorAll('#theme button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.t === t)));
+  try { t === 'auto' ? localStorage.removeItem('icapInspectorTheme') : localStorage.setItem('icapInspectorTheme', t); } catch {}
+}
+$('theme').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) applyTheme(b.dataset.t); });
+applyTheme(document.documentElement.dataset.theme);
 
 loadSettings();
 renderAll();
