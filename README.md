@@ -9,6 +9,12 @@ Browsers can't open raw TCP sockets, so a small Node.js backend (`server.js`, no
 Requires Node.js 18 or later. Nothing else to install.
 
 ```
+npx icap-inspector --open
+```
+
+To run the latest code from GitHub instead of the npm release (Git must be installed):
+
+```
 npx github:reddoubledecker/icap-inspector --open
 ```
 
