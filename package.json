@@ -12,6 +12,14 @@
     "testing"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/reddoubledecker/icap-inspector.git"
+  },
+  "homepage": "https://github.com/reddoubledecker/icap-inspector#readme",
+  "bugs": {
+    "url": "https://github.com/reddoubledecker/icap-inspector/issues"
+  },
   "bin": {
     "icap-inspector": "bin/icap-inspector.js"
   },

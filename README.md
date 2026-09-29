@@ -9,13 +9,13 @@ Browsers can't open raw TCP sockets, so a small Node.js backend (`server.js`, no
 Requires Node.js 18 or later. Nothing else to install.
 
 ```
-npx github:<owner>/icap-inspector --open
+npx github:reddoubledecker/icap-inspector --open
 ```
 
 Or from a clone:
 
 ```
-git clone https://github.com/<owner>/icap-inspector.git
+git clone https://github.com/reddoubledecker/icap-inspector.git
 cd icap-inspector
 node bin/icap-inspector.js --open      # Windows: start.cmd
 ```
