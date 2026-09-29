@@ -1,0 +1,30 @@
+{
+  "name": "icap-inspector",
+  "version": "1.0.0",
+  "description": "Web UI that speaks ICAP (RFC 3507) directly to any ICAP server and shows every protocol step live.",
+  "keywords": [
+    "icap",
+    "rfc3507",
+    "antivirus",
+    "dlp",
+    "content-filtering",
+    "proxy",
+    "testing"
+  ],
+  "license": "MIT",
+  "bin": {
+    "icap-inspector": "bin/icap-inspector.js"
+  },
+  "main": "server.js",
+  "files": [
+    "bin/",
+    "public/",
+    "server.js"
+  ],
+  "scripts": {
+    "start": "node bin/icap-inspector.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

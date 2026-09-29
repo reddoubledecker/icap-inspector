@@ -1,0 +1,650 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ICAP Inspector</title>
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
+<style>
+  :root {
+    --bg: #f4f6f8; --panel: #ffffff; --text: #17202a; --muted: #5d6b7b; --border: #dbe1e8;
+    --code: #f0f3f6; --accent: #1f5fd6; --accent-text: #ffffff; --lane: #cfd7e0;
+    --ok: #13803b; --ok-bg: #e7f5ec; --bad: #c42b2b; --bad-bg: #fbeaea;
+    --warn: #a95c00; --warn-bg: #fdf1e1; --info: #4b5b70; --info-bg: #eef1f5;
+    --mono: ui-monospace, "Cascadia Code", Consolas, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f141a; --panel: #171e26; --text: #e3e9ef; --muted: #93a1b1; --border: #2a3440;
+      --code: #0f151c; --accent: #5b94ff; --accent-text: #0b1220; --lane: #34414f;
+      --ok: #4cc97a; --ok-bg: #11291b; --bad: #ff6b6b; --bad-bg: #2f1616;
+      --warn: #f0a847; --warn-bg: #2e2112; --info: #a7b5c6; --info-bg: #1d2530;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px;
+    background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5; }
+  .brand { font-weight: 650; font-size: 16px; display: flex; align-items: center; gap: 10px; }
+  .brand small { font-weight: 400; color: var(--muted); margin-left: 8px; font-size: 13px; }
+  .top-right { display: flex; align-items: center; gap: 10px; }
+  .top-right button { padding: 4px 10px; font-size: 13px; }
+  .pill { font: 12px var(--mono); color: var(--muted); border: 1px solid var(--border); border-radius: 99px; padding: 3px 10px; }
+  .layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 16px; padding: 16px 20px; max-width: 1500px; margin: 0 auto; }
+  @media (max-width: 960px) { .layout { grid-template-columns: 1fr; padding: 12px 16px; } }
+  aside, main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  h3 { font-size: 13px; margin: 14px 0 6px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  input[type=text], input[type=number], input:not([type]), select, textarea {
+    display: block; width: 100%; margin-top: 3px; padding: 6px 8px; font: 13px var(--mono); color: var(--text);
+    background: var(--code); border: 1px solid var(--border); border-radius: 6px; }
+  input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .row2 { display: grid; grid-template-columns: 1fr 96px; gap: 8px; align-items: end; }
+  .checks { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 8px; }
+  .checks label, label.chk { display: flex; align-items: center; gap: 6px; color: var(--text); font-size: 13px; margin: 0; }
+  label.chk { padding-bottom: 14px; }
+  details { margin-top: 4px; }
+  summary { cursor: pointer; font-size: 12px; color: var(--accent); margin-bottom: 8px; }
+  button { font: inherit; border-radius: 7px; padding: 7px 12px; cursor: pointer; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button.full { width: 100%; }
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+  .seg { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 10px; }
+  .seg button { border: 0; border-radius: 0; background: transparent; padding: 7px; }
+  .seg button small { display: block; font-size: 11px; color: var(--muted); }
+  .seg button.on { background: var(--accent); color: var(--accent-text); }
+  .seg button.on small { color: inherit; opacity: .85; }
+  .drop { border: 1.5px dashed var(--border); border-radius: 8px; padding: 14px; text-align: center; font-size: 13px; }
+  .drop.over { border-color: var(--accent); background: var(--code); }
+  .drop.has { border-style: solid; border-color: var(--accent); }
+  .link { display: inline; color: var(--accent); cursor: pointer; text-decoration: underline; font-size: inherit; margin: 0; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; margin: 10px 0 6px; }
+  .samples { display: flex; flex-direction: column; gap: 4px; }
+  .sample-row { display: flex; gap: 4px; }
+  .sample { flex: 1; min-width: 0; text-align: left; display: flex; justify-content: space-between; gap: 8px; padding: 6px 9px; font-size: 13px; }
+  .view { padding: 0 9px; font-size: 12px; color: var(--accent); }
+  dialog { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 64px); padding: 0; border: 1px solid var(--border);
+    border-radius: 10px; background: var(--panel); color: var(--text); }
+  dialog::backdrop { background: rgba(0, 0, 0, .45); }
+  .dlg-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; background: var(--panel); }
+  .dlg-head strong { font-family: var(--mono); }
+  .dlg-body { padding: 14px 16px 18px; }
+  .sample.on { border-color: var(--accent); background: var(--code); }
+  .sample span:last-child { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .sample em { display: block; font-style: normal; color: var(--muted); font-size: 11px; }
+
+  .verdict { border-radius: 10px; padding: 16px 18px; border: 1px solid var(--border); background: var(--panel); }
+  .verdict .v-label { font-size: 22px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+  .verdict .v-reason { margin-top: 4px; }
+  .verdict.allow, .verdict.ok { background: var(--ok-bg); border-color: var(--ok); } .verdict.allow .v-label, .verdict.ok .v-label { color: var(--ok); }
+  .verdict.block, .verdict.error { background: var(--bad-bg); border-color: var(--bad); } .verdict.block .v-label, .verdict.error .v-label { color: var(--bad); }
+  .verdict.modified { background: var(--warn-bg); border-color: var(--warn); } .verdict.modified .v-label { color: var(--warn); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .chip { font: 12px var(--mono); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; }
+  .spinner { width: 16px; height: 16px; border: 2.5px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .lanes-head, .row { display: grid; grid-template-columns: 72px minmax(0, 1fr); }
+  .lanes-head { position: sticky; top: 53px; background: var(--panel); z-index: 2; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  .lanes-head .names { position: relative; height: 34px; }
+  .lanes-head .names div { position: absolute; transform: translateX(-50%); text-align: center; font-weight: 600; font-size: 12px; width: 32%; }
+  .lanes-head .names div small { display: block; font-weight: 400; color: var(--muted); font-size: 11px; }
+  .row .t { font: 11px var(--mono); color: var(--muted); padding-top: 20px; text-align: right; padding-right: 10px; }
+  .row .lanes { position: relative; height: 42px; }
+  .row.clickable { cursor: pointer; }
+  .row.clickable:hover .lanes { background: var(--code); }
+  .ln { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px solid var(--lane); }
+  .ln.dash { border-left-style: dashed; }
+  .arrow { position: absolute; top: 28px; border-top: 2px solid currentColor; color: var(--accent); }
+  .arrow span, .scan span { position: absolute; bottom: 3px; left: 4px; right: 4px; text-align: center; font-size: 12px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+  .arrow.r::after, .arrow.l::before { content: ""; position: absolute; top: -7px; border-style: solid; }
+  .arrow.r::after { right: -2px; border-width: 6px 0 6px 9px; border-color: transparent transparent transparent currentColor; }
+  .arrow.l::before { left: -2px; border-width: 6px 9px 6px 0; border-color: transparent currentColor transparent transparent; }
+  .tone-ok { color: var(--ok); } .tone-bad { color: var(--bad); } .tone-warn { color: var(--warn); } .tone-info { color: var(--info); }
+  .scan { position: absolute; top: 28px; border-top: 2px dashed var(--muted); }
+  .scan.live { border-top-color: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .note { position: absolute; top: 10px; left: 1%; right: 1%; font-size: 12px; padding: 3px 8px; border-radius: 6px;
+    background: var(--info-bg); color: var(--info); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .note.error { background: var(--bad-bg); color: var(--bad); font-weight: 600; }
+  .note.wait { left: auto; right: auto; transform: translateX(-50%); }
+  .rawwrap { grid-column: 1 / -1; }
+  pre { margin: 0; font: 12px/1.5 var(--mono); background: var(--code); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px; overflow: auto; max-height: 360px; white-space: pre-wrap; word-break: break-all; }
+  pre.raw { margin: 2px 0 8px 72px; }
+  .empty { color: var(--muted); padding: 20px 0; text-align: center; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 600; }
+  td.mono, .mono { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+  tr.hl td { background: var(--warn-bg); }
+  .tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 99px; }
+  .tag.allow, .tag.ok { background: var(--ok-bg); color: var(--ok); }
+  .tag.block, .tag.error { background: var(--bad-bg); color: var(--bad); }
+  .tag.modified { background: var(--warn-bg); color: var(--warn); }
+  .tag.run, .tag.policy { background: var(--info-bg); color: var(--info); }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  iframe.blockpage { width: 100%; height: 320px; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+  #history { list-style: none; margin: 0; padding: 0; }
+  #history li { display: grid; grid-template-columns: 96px 1fr auto auto; gap: 10px; align-items: center; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  #history li:hover, #history li.on { background: var(--code); }
+  #history li .mono { color: var(--muted); }
+  #suite tr { cursor: pointer; }
+  .btnrow { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  a.btn { display: inline-block; text-decoration: none; color: var(--text); border: 1px solid var(--border); border-radius: 7px; padding: 5px 10px; font-size: 13px; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><img src="/logo.svg" alt="" width="28" height="28">ICAP Inspector <small>direct ICAP client for testing ICAP servers</small></div>
+  <div class="top-right">
+    <div class="pill" id="target">no server set</div>
+    <button id="btnReset" title="Clear history, timeline, test-suite results and payload selection. Server settings are kept.">Reset session</button>
+  </div>
+</header>
+
+<div class="layout">
+  <aside>
+    <section class="card">
+      <h2>ICAP server</h2>
+      <div class="row2">
+        <label>Host<input id="host" placeholder="10.0.0.20"></label>
+        <label>Port<input id="port" type="number" value="1344"></label>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="tls"> ICAPS (TLS)</label>
+        <label><input type="checkbox" id="insecure" checked> Accept self-signed</label>
+      </div>
+      <label>Timeout (seconds)<input id="timeout" type="number" value="60"></label>
+      <button id="btnOptions" class="full">Probe service (OPTIONS)</button>
+    </section>
+
+    <section class="card">
+      <h2>Transaction</h2>
+      <div class="seg" id="mode">
+        <button data-v="RESPMOD" class="on">RESPMOD<small>download scan</small></button>
+        <button data-v="REQMOD">REQMOD<small>upload / URL scan</small></button>
+      </div>
+      <label>RESPMOD service<input id="respService" placeholder="service path, e.g. avscan"></label>
+      <label>REQMOD service<input id="reqService" placeholder="service path, e.g. avscan"></label>
+      <label>Simulated URL <span class="muted">({name} = file name)</span><input id="url" value="http://lab.test/files/{name}"></label>
+      <div class="row2">
+        <label>Preview bytes<input id="preview" type="number" min="0" placeholder="off"></label>
+        <label class="chk"><input type="checkbox" id="allow204" checked> Allow: 204</label>
+      </div>
+      <label id="encWrap" hidden>Upload encoding
+        <select id="uploadEncoding"><option value="multipart">multipart/form-data (browser-like)</option><option value="raw">raw body</option></select>
+      </label>
+      <details>
+        <summary>Client identity &amp; extra ICAP headers</summary>
+        <label>X-Client-IP<input id="clientIp" placeholder="192.168.10.50"></label>
+        <label>X-Authenticated-User<input id="user" placeholder="alice  (or base64 of WinNT://LAB/alice)"></label>
+        <label>Extra ICAP headers, one per line<textarea id="extraHeaders" rows="3" placeholder="X-Custom-Header: value"></textarea></label>
+      </details>
+    </section>
+
+    <section class="card">
+      <h2>Payload</h2>
+      <div id="drop" class="drop">
+        Drop a file here or <label class="link">browse<input type="file" id="file" hidden></label>
+        <div id="fileInfo" class="muted"></div>
+      </div>
+      <div class="muted small">…or a built-in test sample:</div>
+      <div id="samples" class="samples"></div>
+      <div class="actions">
+        <button id="btnSend" class="primary">Send to ICAP</button>
+        <button id="btnSuite">Run test suite</button>
+      </div>
+      <div class="hint">In REQMOD with no payload, a bodiless GET is sent (URL / header policy check).</div>
+    </section>
+  </aside>
+
+  <main>
+    <section id="verdict" class="verdict"></section>
+
+    <section class="card">
+      <h2>Protocol timeline <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:400">— click a step to see the raw bytes</span></h2>
+      <div class="lanes-head">
+        <div></div>
+        <div class="names">
+          <div style="left:16.667%">Inspector<small>this tool (ICAP client)</small></div>
+          <div style="left:50%">ICAP Server<small id="laneIcap">—</small></div>
+          <div style="left:83.333%">Scan engine<small>inferred from wait time</small></div>
+        </div>
+      </div>
+      <div id="timeline"></div>
+    </section>
+
+    <section class="card" id="suiteCard" hidden>
+      <h2>Test suite</h2>
+      <table id="suite"></table>
+    </section>
+
+    <section class="card" id="details" hidden></section>
+
+    <section class="card">
+      <h2>History (this session)</h2>
+      <ul id="history"></ul>
+      <div id="historyEmpty" class="empty">No transactions yet.</div>
+    </section>
+  </main>
+</div>
+
+<dialog id="sampleDialog">
+  <div class="dlg-head"><strong id="sdTitle"></strong><form method="dialog"><button>Close</button></form></div>
+  <div class="dlg-body" id="sdBody"></div>
+</dialog>
+
+<script>
+const $ =(id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmtBytes = (n) => n == null ? '—' : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(2)} MB`;
+const fmtMs = (ms) => ms == null ? '—' : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`;
+const showRaw = (s) => String(s ?? '').replace(/\r\n/g, '\n');
+
+const FIELDS = ['host', 'port', 'timeout', 'respService', 'reqService', 'url', 'preview', 'clientIp', 'user', 'extraHeaders', 'uploadEncoding'];
+const CHECKS = ['tls', 'insecure', 'allow204'];
+const LANE_X = [100 / 6, 50, 500 / 6];
+const TAG_TEXT = { allow: 'Allowed', block: 'Blocked', modified: 'Modified', error: 'Error', ok: 'OK', policy: 'Policy-dependent' };
+
+let mode = 'RESPMOD';
+let selectedFile = null, selectedSample = null, samples = [];
+let history = [], current = null, busy = false, suiteRows = null, liveTimer = null;
+
+// ------------------------------------------------------------ settings
+function saveSettings() {
+  try {
+    const s = { mode };
+    FIELDS.forEach((f) => (s[f] = $(f).value));
+    CHECKS.forEach((f) => (s[f] = $(f).checked));
+    localStorage.setItem('icapInspector', JSON.stringify(s));
+  } catch {}
+  updateTarget();
+}
+function loadSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem('icapInspector') || '{}');
+    FIELDS.forEach((f) => s[f] != null && ($(f).value = s[f]));
+    CHECKS.forEach((f) => s[f] != null && ($(f).checked = s[f]));
+    if (s.mode) setMode(s.mode, false);
+  } catch {}
+  updateTarget();
+}
+function cfg() {
+  const c = { mode };
+  FIELDS.forEach((f) => (c[f] = $(f).value));
+  CHECKS.forEach((f) => (c[f] = $(f).checked));
+  c.service = mode === 'REQMOD' ? c.reqService : c.respService;
+  return c;
+}
+function updateTarget() {
+  const h = $('host').value.trim();
+  const svc = mode === 'REQMOD' ? $('reqService').value : $('respService').value;
+  $('target').textContent = h ? `${$('tls').checked ? 'icaps' : 'icap'}://${h}:${$('port').value}/${svc}` : 'no server set';
+  $('laneIcap').textContent = h ? `${h}:${$('port').value}` : '—';
+}
+function setMode(v, save = true) {
+  mode = v;
+  document.querySelectorAll('#mode button').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
+  $('encWrap').hidden = v !== 'REQMOD';
+  if (save) saveSettings(); else updateTarget();
+}
+
+// ------------------------------------------------------------ payload
+function renderSamples() {
+  $('samples').innerHTML = samples.map((s) => `
+    <div class="sample-row">
+      <button class="sample ${selectedSample && selectedSample.id === s.id ? 'on' : ''}" data-id="${esc(s.id)}" title="${esc(s.desc)}">
+        <span>${esc(s.name)}<em>${esc(s.desc)}</em></span><span>${fmtBytes(s.size)}</span>
+      </button>
+      <button class="view" data-view="${esc(s.id)}" title="View ${esc(s.name)} content" aria-label="View ${esc(s.name)} content">view</button>
+    </div>`).join('');
+}
+
+async function viewSample(id) {
+  const dlg = $('sampleDialog');
+  $('sdTitle').textContent = 'Loading…';
+  $('sdBody').innerHTML = '';
+  dlg.showModal();
+  try {
+    const r = await fetch(`/api/samples/${encodeURIComponent(id)}`);
+    if (!r.ok) throw new Error(await r.text());
+    const s = await r.json();
+    $('sdTitle').textContent = s.name;
+    $('sdBody').innerHTML = `
+      <p class="muted" style="margin:0 0 10px">${esc(s.desc)}</p>
+      <table>
+        <tr><td>Size</td><td class="mono">${fmtBytes(s.size)} (${s.size.toLocaleString()} bytes)</td></tr>
+        <tr><td>Content-Type sent</td><td class="mono">${esc(s.mime)}</td></tr>
+        <tr><td>SHA-256</td><td class="mono">${esc(s.sha256)}</td></tr>
+        <tr><td>Expected result</td><td>${tag(s.expect)}</td></tr>
+      </table>
+      ${s.tree ? `<h3>Archive structure</h3><pre>${esc(s.tree)}</pre>` : ''}
+      <h3>${s.previewType === 'hex' ? 'Hex dump' : 'Content'}${s.size > 4096 ? ' <span class="muted" style="font-weight:400">(first 4 KB)</span>' : ''}</h3>
+      <pre>${esc(s.preview)}</pre>`;
+  } catch (e) {
+    $('sdTitle').textContent = 'Could not load sample';
+    $('sdBody').innerHTML = `<pre>${esc(e.message)}</pre>`;
+  }
+}
+function renderPayload() {
+  const d = $('drop');
+  d.classList.toggle('has', !!selectedFile);
+  $('fileInfo').textContent = selectedFile ? `${selectedFile.name} · ${fmtBytes(selectedFile.size)} · ${selectedFile.type || 'unknown type'}` : '';
+  renderSamples();
+}
+function pickFile(f) { selectedFile = f || null; selectedSample = null; renderPayload(); }
+
+// ------------------------------------------------------------ transport
+async function runTx(label, url, init) {
+  const tx = { label, started: new Date(), events: [], result: null, open: new Set() };
+  history.unshift(tx);
+  current = tx;
+  renderAll();
+  try {
+    const r = await fetch(url, init);
+    if (!r.ok) throw new Error(await r.text());
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        if (!line.trim()) continue;
+        const ev = JSON.parse(line);
+        if (ev.kind === 'done') tx.result = ev;
+        else { ev._at = performance.now(); tx.events.push(ev); }
+        if (tx === current) renderAll();
+      }
+    }
+    if (!tx.result) throw new Error('Stream ended without a result');
+  } catch (e) {
+    tx.events.push({ kind: 'error', title: e.message });
+    tx.result = { verdict: { code: 'error', label: 'Failed', reason: e.message } };
+  }
+  if (tx === current) renderAll(); else renderHistory();
+  return tx;
+}
+
+function probe() {
+  const c = cfg();
+  return runTx(`OPTIONS /${c.service}`, '/api/options', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(c),
+  });
+}
+
+function scan(sample) {
+  const c = cfg();
+  let body, label;
+  if (sample) { c.sample = sample.id; label = sample.name; }
+  else if (selectedSample) { c.sample = selectedSample.id; label = selectedSample.name; }
+  else if (selectedFile) {
+    c.fileName = selectedFile.name;
+    c.mime = selectedFile.type || 'application/octet-stream';
+    body = selectedFile;
+    label = selectedFile.name;
+  } else if (mode === 'REQMOD') label = 'URL-only GET';
+  else { alert('Pick a file or a sample first (RESPMOD needs content to scan).'); return null; }
+  return runTx(`${mode} · ${label}`, `/api/scan?cfg=${encodeURIComponent(JSON.stringify(c))}`, { method: 'POST', body });
+}
+
+async function guarded(fn) {
+  if (busy) return;
+  if (!$('host').value.trim()) { alert('Enter the ICAP server host first.'); $('host').focus(); return; }
+  const svc = mode === 'REQMOD' ? 'reqService' : 'respService';
+  if (!$(svc).value.trim()) { alert(`Enter the ${mode} service name first (the path after the port in icap://host:port/<service>).`); $(svc).focus(); return; }
+  busy = true;
+  setBusy();
+  try { await fn(); } finally { busy = false; setBusy(); }
+}
+function setBusy() { ['btnSend', 'btnSuite', 'btnOptions', 'btnReset'].forEach((id) => ($(id).disabled = busy)); }
+
+function resetSession() {
+  if (busy) return;
+  if (history.length && !confirm(`Clear ${history.length} transaction${history.length === 1 ? '' : 's'} and all results? Server settings are kept.`)) return;
+  history = [];
+  current = null;
+  suiteRows = null;
+  $('suiteCard').hidden = true;
+  $('suite').innerHTML = '';
+  selectedFile = null;
+  selectedSample = null;
+  $('file').value = '';
+  renderPayload();
+  renderAll();
+}
+
+async function runSuite() {
+  suiteRows = samples.map((s) => ({ sample: s, tx: null }));
+  renderSuite();
+  for (const row of suiteRows) {
+    const p = scan(row.sample);
+    row.tx = history[0];
+    renderSuite();
+    await p;
+    renderSuite();
+  }
+}
+
+// ------------------------------------------------------------ rendering
+function renderAll() {
+  renderVerdict();
+  renderTimeline();
+  renderDetails();
+  renderHistory();
+  renderSuite();
+}
+
+function renderVerdict() {
+  const v = $('verdict');
+  const tx = current;
+  if (!tx) {
+    v.className = 'verdict';
+    v.innerHTML = `<div class="v-label">Ready</div><div class="v-reason muted">Set the ICAP server on the left, probe it with OPTIONS, then send a sample or your own file.</div>`;
+    return;
+  }
+  const r = tx.result;
+  if (!r) {
+    v.className = 'verdict';
+    v.innerHTML = `<div class="v-label"><span class="spinner"></span>In progress</div><div class="v-reason muted">${esc(tx.label)}</div>`;
+    return;
+  }
+  const chips = [];
+  if (r.icap) chips.push(`ICAP ${r.icap.status} ${esc(r.icap.reason)}`);
+  if (r.verdict.httpStatus) chips.push(`HTTP ${r.verdict.httpStatus}`);
+  if (r.totalMs != null) chips.push(`total ${fmtMs(r.totalMs)}`);
+  if (r.timings) chips.push(`server ${fmtMs(r.timings.serverMs)}`);
+  if (r.sent) chips.push(`sent ${fmtBytes(r.sent.size)}`);
+  if (r.type === 'scan') chips.push(r.received ? `returned ${fmtBytes(r.received.size)}` : 'no body returned');
+  v.className = `verdict ${r.verdict.code}`;
+  v.innerHTML = `<div class="v-label">${esc(r.verdict.label)}</div>
+    <div class="v-reason">${esc(r.verdict.reason)}</div>
+    <div class="muted" style="margin-top:4px;font-size:12px">${esc(tx.label)}</div>
+    <div class="chips">${chips.map((c) => `<span class="chip">${c}</span>`).join('')}</div>`;
+}
+
+function rowHtml(tx, ev, i) {
+  const next = tx.events[i + 1];
+  const lines = LANE_X.map((x, k) => `<i class="ln ${k === 2 ? 'dash' : ''}" style="left:${x}%"></i>`).join('');
+  let body;
+  if (ev.kind === 'send' || ev.kind === 'recv') {
+    const [a, b] = ev.kind === 'send' ? [0, 1] : [1, 0];
+    const tone = ev.tone ? `tone-${ev.tone}` : '';
+    body = `<div class="arrow ${a < b ? 'r' : 'l'} ${tone}" style="left:${Math.min(LANE_X[a], LANE_X[b])}%;width:${Math.abs(LANE_X[a] - LANE_X[b])}%" title="${esc(ev.title)}"><span>${esc(ev.title)}</span></div>`;
+  } else if (ev.kind === 'wait') {
+    const live = !next && !tx.result;
+    const dur = next ? fmtMs(next.t - ev.t) : live ? '…' : '';
+    const timer = `<b ${live ? `id="liveWait" data-at="${ev._at}"` : ''}>${dur}</b>`;
+    body = ev.core
+      ? `<div class="scan ${live ? 'live' : ''}" style="left:${LANE_X[1]}%;width:${LANE_X[2] - LANE_X[1]}%"><span>${esc(ev.title)} · ${timer}</span></div>`
+      : `<div class="note wait" style="left:${LANE_X[1]}%">${esc(ev.title)} · ${timer}</div>`;
+  } else {
+    body = `<div class="note ${ev.kind === 'error' ? 'error' : ''}" title="${esc(ev.title)}">${ev.kind === 'error' ? '✕ ' : ''}${esc(ev.title)}</div>`;
+  }
+  const t = ev.t != null ? `${ev.t.toFixed(1)}` : '';
+  const open = ev.raw && tx.open.has(i);
+  return `<div class="row ${ev.raw ? 'clickable' : ''}" data-i="${i}"><div class="t">${t}</div><div class="lanes">${lines}${body}</div></div>` +
+    (open ? `<pre class="raw">${esc(showRaw(ev.raw))}</pre>` : '');
+}
+
+function renderTimeline() {
+  const el = $('timeline');
+  clearInterval(liveTimer);
+  if (!current) { el.innerHTML = `<div class="empty">The ICAP conversation will appear here, step by step. Times are in ms since connect.</div>`; return; }
+  el.innerHTML = current.events.map((ev, i) => rowHtml(current, ev, i)).join('');
+  const live = $('liveWait');
+  if (live) {
+    const at = Number(live.dataset.at);
+    liveTimer = setInterval(() => { const n = $('liveWait'); if (n) n.textContent = fmtMs(performance.now() - at); }, 100);
+  }
+}
+
+function headerTable(headers) {
+  return `<table><tr><th>Header</th><th>Value</th></tr>${headers.map(([k, v]) =>
+    `<tr class="${/^x-/i.test(k) ? 'hl' : ''}"><td class="mono">${esc(k)}</td><td class="mono">${esc(v)}</td></tr>`).join('')}</table>`;
+}
+
+function renderDetails() {
+  const d = $('details');
+  const r = current && current.result;
+  if (!r || !r.type) { d.hidden = true; return; }
+  d.hidden = false;
+  let html = '';
+  if (r.type === 'options') {
+    const pv = (r.icap.headers.find(([k]) => /^preview$/i.test(k)) || [])[1];
+    html = `<h2>Service capabilities</h2>
+      <div class="mono muted" style="margin-bottom:8px">${esc(r.uri)}</div>
+      ${headerTable(r.icap.headers)}
+      ${pv ? `<div class="btnrow"><button id="usePreview" data-v="${esc(pv)}">Use advertised Preview (${esc(pv)} bytes)</button></div>` : ''}`;
+  } else {
+    const rec = r.received;
+    const same = r.sent && rec && r.sent.sha256 === rec.sha256;
+    html = `<h2>Response details</h2>
+      <div class="grid2">
+        <div>
+          <h3>ICAP response headers <span class="muted" style="font-weight:400">(X-* highlighted)</span></h3>
+          ${headerTable(r.icap.headers)}
+        </div>
+        <div>
+          <h3>Content comparison</h3>
+          <table>
+            <tr><th></th><th>Size</th><th>SHA-256</th></tr>
+            <tr><td>Original file</td><td>${fmtBytes(r.file.size)}</td><td class="mono">${esc(r.file.sha256)}</td></tr>
+            ${r.sent ? `<tr><td>Encapsulated body sent</td><td>${fmtBytes(r.sent.size)}</td><td class="mono">${esc(r.sent.sha256)}</td></tr>` : ''}
+            <tr><td>Body returned</td><td>${rec ? fmtBytes(rec.size) : '—'}</td><td class="mono">${rec ? esc(rec.sha256) : r.icap.status === 204 ? 'none (204 — original is used)' : 'none'}</td></tr>
+          </table>
+          ${rec ? `<div class="hint">${same ? 'Returned body is identical to what was sent.' : 'Returned body differs from what was sent.'}</div>` : ''}
+        </div>
+      </div>
+      ${Object.entries(r.http || {}).map(([k, v]) => `<h3>Encapsulated ${esc(k)}</h3><pre>${esc(showRaw(v))}</pre>`).join('')}
+      ${rec ? `<h3>Returned body ${rec.contentType ? `<span class="muted" style="font-weight:400">(${esc(rec.contentType)})</span>` : ''}</h3>
+        <pre>${esc(rec.preview)}</pre>
+        <div class="btnrow"><a class="btn" href="/api/output/${esc(rec.id)}">Download returned body</a>
+        ${/html/i.test(rec.contentType || '') ? `<a class="btn" href="/api/output/${esc(rec.id)}?view=1" target="_blank" rel="noopener">Open in new tab</a>` : ''}</div>
+        ${/html/i.test(rec.contentType || '') ? `<h3>Rendered page (sandboxed)</h3><iframe class="blockpage" sandbox src="/api/output/${esc(rec.id)}?view=1"></iframe>` : ''}` : ''}`;
+  }
+  d.innerHTML = html;
+}
+
+function tag(code) { return `<span class="tag ${esc(code)}">${esc(TAG_TEXT[code] || code)}</span>`; }
+
+function renderHistory() {
+  $('historyEmpty').hidden = history.length > 0;
+  $('history').innerHTML = history.map((tx, i) => {
+    const r = tx.result;
+    return `<li data-i="${i}" class="${tx === current ? 'on' : ''}">
+      <span class="mono">${tx.started.toLocaleTimeString()}</span>
+      <span>${esc(tx.label)}</span>
+      <span class="mono">${r ? fmtMs(r.totalMs) : ''}</span>
+      ${r ? tag(r.verdict.code) : '<span class="tag run">running</span>'}</li>`;
+  }).join('');
+}
+
+function renderSuite() {
+  if (!suiteRows) return;
+  $('suiteCard').hidden = false;
+  $('suite').innerHTML = `<tr><th>Sample</th><th>Expected</th><th>Result</th><th>ICAP</th><th>Time</th><th>Match</th></tr>` +
+    suiteRows.map((row, i) => {
+      const r = row.tx && row.tx.result;
+      const exp = row.sample.expect;
+      const match = !r ? '' : exp === 'policy' ? '<span class="muted">review</span>' : r.verdict.code === exp ? '✅' : '❌';
+      return `<tr data-i="${i}">
+        <td>${esc(row.sample.name)}<div class="muted" style="font-size:11px">${esc(row.sample.desc)}</div></td>
+        <td>${tag(exp)}</td>
+        <td>${r ? tag(r.verdict.code) : row.tx ? '<span class="tag run">running</span>' : '<span class="muted">queued</span>'}</td>
+        <td class="mono">${r && r.icap ? r.icap.status : ''}</td>
+        <td class="mono">${r ? fmtMs(r.totalMs) : ''}</td>
+        <td>${match}</td></tr>`;
+    }).join('');
+}
+
+// ------------------------------------------------------------ wiring
+document.querySelectorAll('#mode button').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.v)));
+FIELDS.concat(CHECKS).forEach((f) => $(f).addEventListener('change', saveSettings));
+$('host').addEventListener('input', updateTarget);
+$('tls').addEventListener('change', () => {
+  const p = $('port');
+  if ($('tls').checked && p.value === '1344') p.value = '11344';
+  if (!$('tls').checked && p.value === '11344') p.value = '1344';
+  saveSettings();
+});
+$('file').addEventListener('change', (e) => pickFile(e.target.files[0]));
+const drop = $('drop');
+drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); pickFile(e.dataTransfer.files[0]); });
+$('samples').addEventListener('click', (e) => {
+  const v = e.target.closest('.view');
+  if (v) { viewSample(v.dataset.view); return; }
+  const b = e.target.closest('.sample');
+  if (!b) return;
+  const s = samples.find((x) => x.id === b.dataset.id);
+  selectedSample = selectedSample === s ? null : s;
+  selectedFile = null;
+  $('file').value = '';
+  renderPayload();
+});
+$('btnOptions').addEventListener('click', () => guarded(probe));
+$('btnSend').addEventListener('click', () => guarded(() => scan()));
+$('btnSuite').addEventListener('click', () => guarded(runSuite));
+$('btnReset').addEventListener('click', resetSession);
+$('timeline').addEventListener('click', (e) => {
+  const row = e.target.closest('.row.clickable');
+  if (!row || !current) return;
+  const i = Number(row.dataset.i);
+  current.open.has(i) ? current.open.delete(i) : current.open.add(i);
+  renderTimeline();
+});
+$('history').addEventListener('click', (e) => {
+  const li = e.target.closest('li');
+  if (li) { current = history[Number(li.dataset.i)]; renderAll(); }
+});
+$('suite').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-i]');
+  const row = tr && suiteRows[Number(tr.dataset.i)];
+  if (row && row.tx) { current = row.tx; renderAll(); }
+});
+$('details').addEventListener('click', (e) => {
+  if (e.target.id === 'usePreview') { $('preview').value = e.target.dataset.v; saveSettings(); }
+});
+
+loadSettings();
+renderAll();
+fetch('/api/samples').then((r) => r.json()).then((s) => { samples = s; renderPayload(); });
+</script>
+</body>
+</html>
