@@ -1,5 +1,6 @@
 {
   "name": "icap-inspector",
+  "private": true,
   "version": "1.0.0",
   "description": "Web UI that speaks ICAP (RFC 3507) directly to any ICAP server and shows every protocol step live.",
   "keywords": [
